@@ -32,6 +32,32 @@
       border-color: #007cba;
       background: #e3f2fd;
     }
+    /* Rich editor */
+    #editor {
+      min-height: 240px;
+      text-align: left;
+      font-family: Arial, sans-serif;
+      font-size: 14px;
+      overflow: auto;
+    }
+    #editor:empty:before {
+      content: 'Paste email here (Ctrl+V). Inline images will show and be OCR’d automatically.';
+      color: #888;
+    }
+    #editor img {
+      max-width: 100%;
+      height: auto;
+      display: inline-block;
+    }
+    .ocr-text {
+      margin: 6px 0 10px 0;
+      padding: 6px 8px;
+      background: #f0f7ff;
+      border-left: 3px solid #007cba;
+      white-space: pre-wrap;
+      font-family: monospace;
+      font-size: 12px;
+    }
     textarea {
       width: 100%;
       box-sizing: border-box;
@@ -93,6 +119,15 @@
       background: #f8d7da;
       color: #721c24;
     }
+    .img-note {
+      display: inline-block;
+      margin: 4px 0 8px 0;
+      padding: 4px 6px;
+      font-size: 12px;
+      color: #555;
+      background: #fff8e1;
+      border-left: 3px solid #ffb300;
+    }
   </style>
 </head>
 <body>
@@ -100,17 +135,22 @@
     <h2>Email Trail Cleaner with OCR</h2>
     
     <div class="input-section">
-      <div class="paste-area" id="pasteArea">
-        <p><strong>Drop images here or paste email content with Ctrl+V</strong></p>
-        <p>Supports: Images (PNG, JPG, GIF, WebP) for OCR extraction</p>
-      </div>
+      <div class="paste-area" id="editor" contenteditable="true"></div>
       <div class="ocr-status" id="ocrStatus"></div>
-      <textarea id="input" rows="18" placeholder="Email content will appear here after pasting or OCR..."></textarea>
+      <textarea id="input" rows="10" style="display:none" placeholder="(synced plain text from editor)"></textarea>
     </div>
 
     <div class="button-group">
       <button class="btn-primary" id="cleanBtn">Clean Email</button>
       <button class="btn-secondary" id="clearBtn">Clear</button>
+      <button class="btn-secondary" id="ocrAllBtn" title="Run OCR on all images in the editor">Run OCR on images</button>
+    </div>
+
+    <div class="button-group">
+      <label style="display:inline-flex; align-items:center; gap:8px;">
+        <input type="checkbox" id="autoOcrToggle" />
+        Auto OCR on paste (may be slow/inaccurate). Use manual OCR if unchecked.
+      </label>
     </div>
 
     <div class="button-group">
@@ -362,6 +402,11 @@ async function processImageWithOCR(file) {
           showOcrStatus(`OCR Progress: ${Math.round(m.progress * 100)}%`, 'processing');
         }
       }
+    ,
+      tessedit_char_blacklist: "{}[]<>~`^|",
+      // PSM 6: Assume a single uniform block of text
+      // You can tweak to 3 or 4 depending on your samples
+      psm: 6
     });
     
     if (text.trim()) {
@@ -382,6 +427,89 @@ async function processImageWithOCR(file) {
 
 function isImageFile(file) {
   return file && file.type && file.type.startsWith('image/');
+}
+
+// Preprocess image for better OCR: upscale, grayscale, increase contrast, binarize
+async function preprocessImageToBlob(imgOrBlob) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      let imgEl;
+      if (imgOrBlob instanceof Blob) {
+        const url = URL.createObjectURL(imgOrBlob);
+        imgEl = new Image();
+        imgEl.crossOrigin = 'anonymous';
+        imgEl.onload = () => {
+          URL.revokeObjectURL(url);
+          resolve(processElement(imgEl));
+        };
+        imgEl.onerror = () => {
+          URL.revokeObjectURL(url);
+          reject(new Error('Image load failed'));
+        };
+        imgEl.src = url;
+      } else {
+        imgEl = imgOrBlob;
+        if (imgEl.complete && imgEl.naturalWidth) {
+          resolve(processElement(imgEl));
+        } else {
+          imgEl.onload = () => resolve(processElement(imgEl));
+          imgEl.onerror = () => reject(new Error('Image load failed'));
+        }
+      }
+
+      function processElement(img) {
+        const scale = 2; // 2x upscale improves small text
+        const w = Math.max(1, Math.floor(img.naturalWidth * scale));
+        const h = Math.max(1, Math.floor(img.naturalHeight * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, w, h);
+        // Grayscale + simple contrast/threshold
+        const imgData = ctx.getImageData(0, 0, w, h);
+        const data = imgData.data;
+        // Compute simple adaptive threshold baseline
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          const gray = 0.2126 * data[i] + 0.7152 * data[i+1] + 0.0722 * data[i+2];
+          sum += gray;
+        }
+        const mean = sum / (data.length / 4);
+        const threshold = Math.min(255, Math.max(0, mean + 10));
+        for (let i = 0; i < data.length; i += 4) {
+          const gray = 0.2126 * data[i] + 0.7152 * data[i+1] + 0.0722 * data[i+2];
+          const v = gray > threshold ? 255 : 0;
+          data[i] = data[i+1] = data[i+2] = v;
+          data[i+3] = 255;
+        }
+        ctx.putImageData(imgData, 0, 0);
+        return new Promise((res) => canvas.toBlob((b) => res(b), 'image/png'));
+      }
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+async function getImageBlobForOCR(imgEl) {
+  try {
+    const src = imgEl.getAttribute('src') || '';
+    if (src.startsWith('blob:') || src.startsWith('data:')) {
+      // Can be drawn to canvas safely
+      const pre = await preprocessImageToBlob(imgEl);
+      return pre;
+    }
+    // Try fetch if CORS allows
+    const resp = await fetch(src, { mode: 'cors' });
+    if (!resp.ok) throw new Error('fetch failed');
+    const blob = await resp.blob();
+    return await preprocessImageToBlob(blob);
+  } catch (e) {
+    return null; // Unavailable (e.g., cid:, blocked CORS)
+  }
 }
 
 /* ---------- Copy chunks ---------- */
@@ -420,68 +548,131 @@ function createChunkButtons(text) {
 }
 
 /* ---------- Event Handlers ---------- */
-const pasteArea = document.getElementById('pasteArea');
+const editorEl = document.getElementById('editor');
 const inputTextarea = document.getElementById('input');
 
-// Paste handling
-pasteArea.addEventListener('paste', async (e) => {
-  e.preventDefault();
-  const items = Array.from(e.clipboardData.items);
-  
-  for (const item of items) {
-    if (item.kind === 'file' && isImageFile(item.getAsFile())) {
-      const file = item.getAsFile();
-      const ocrText = await processImageWithOCR(file);
-      if (ocrText) {
-        inputTextarea.value = (inputTextarea.value + '\n' + ocrText).trim();
+function syncPlainTextFromEditor() {
+  // Convert the editor's visible text (including OCR inserts) into plain text
+  const text = editorEl.innerText || '';
+  inputTextarea.value = text.trim();
+}
+
+function insertImageAtCaret(src) {
+  const img = document.createElement('img');
+  img.src = src;
+  img.crossOrigin = 'anonymous';
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount > 0) {
+    const range = sel.getRangeAt(0);
+    range.deleteContents();
+    range.insertNode(img);
+    // Move caret after image
+    range.setStartAfter(img);
+    range.setEndAfter(img);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  } else {
+    editorEl.appendChild(img);
+  }
+}
+
+async function ocrImageSrc(src, imgEl) {
+  try {
+    const preBlob = await getImageBlobForOCR(imgEl);
+    if (!preBlob) {
+      if (!imgEl.dataset.ocrMarked) {
+        const note = document.createElement('div');
+        note.className = 'img-note';
+        note.textContent = 'Image cannot be OCR’d (cid: or blocked by CORS).';
+        imgEl.insertAdjacentElement('afterend', note);
+        imgEl.dataset.ocrMarked = '1';
       }
       return;
     }
+    const text = await processImageWithOCR(preBlob);
+    if (text && imgEl && !imgEl.dataset.ocrDone) {
+      const ocrDiv = document.createElement('div');
+      ocrDiv.className = 'ocr-text';
+      ocrDiv.textContent = text.trim();
+      imgEl.insertAdjacentElement('afterend', ocrDiv);
+      imgEl.dataset.ocrDone = '1';
+      syncPlainTextFromEditor();
+    }
+  } catch (err) {
+    // ignore failures for non-fetchable sources (e.g., cid:)
   }
-  
-  // Handle text paste
-  const text = e.clipboardData.getData('text/plain');
-  if (text) {
-    inputTextarea.value = text;
-  }
+}
+
+function processEditorContentAfterPaste(e) {
+  // Give the browser a tick to insert pasted content
+  setTimeout(async () => {
+    // If clipboard included image files, insert them at caret
+    const items = Array.from((e.clipboardData || {}).items || []);
+    for (const item of items) {
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        if (isImageFile(file)) {
+          const url = URL.createObjectURL(file);
+          insertImageAtCaret(url);
+          // OCR this image
+          const lastImg = editorEl.querySelector('img:last-of-type');
+          if (lastImg) {
+            await ocrImageSrc(url, lastImg);
+          }
+        }
+      }
+    }
+
+    // Optionally OCR images present that haven't been processed
+    const imgs = Array.from(editorEl.querySelectorAll('img'));
+    // Ensure crossOrigin to maximize CORS success
+    imgs.forEach(i => { if (!i.crossOrigin) i.crossOrigin = 'anonymous'; });
+    const auto = document.getElementById('autoOcrToggle');
+    if (auto && auto.checked) {
+      for (const img of imgs) {
+        const src = img.getAttribute('src') || '';
+        if (!img.dataset.ocrDone) {
+          await ocrImageSrc(src, img);
+        }
+      }
+    }
+
+    syncPlainTextFromEditor();
+  }, 0);
+}
+
+// Handle paste into the rich editor
+editorEl.addEventListener('paste', (e) => {
+  // Allow default HTML paste to keep formatting and inline images if available
+  processEditorContentAfterPaste(e);
 });
 
-// Global paste handling
-document.addEventListener('paste', async (e) => {
-  if (e.target === inputTextarea) return; // Let textarea handle its own paste
-  
-  e.preventDefault();
-  const items = Array.from(e.clipboardData.items);
-  
-  for (const item of items) {
-    if (item.kind === 'file' && isImageFile(item.getAsFile())) {
-      const file = item.getAsFile();
-      const ocrText = await processImageWithOCR(file);
-      if (ocrText) {
-        inputTextarea.value = (inputTextarea.value + '\n' + ocrText).trim();
-      }
-      return;
+// Per-image OCR by clicking an image
+editorEl.addEventListener('click', async (e) => {
+  const target = e.target;
+  if (target && target.tagName === 'IMG') {
+    const img = target;
+    if (!img.dataset.ocrDone) {
+      const src = img.getAttribute('src') || '';
+      await ocrImageSrc(src, img);
     }
   }
-  
-  const text = e.clipboardData.getData('text/plain');
-  if (text) {
-    inputTextarea.value = text;
+});
+
+// Manual Run OCR on all images
+document.getElementById('ocrAllBtn').addEventListener('click', async () => {
+  const imgs = Array.from(editorEl.querySelectorAll('img'));
+  for (const img of imgs) {
+    if (!img.dataset.ocrDone) {
+      const src = img.getAttribute('src') || '';
+      await ocrImageSrc(src, img);
+    }
   }
-});
-
-// Drag and drop - removed since we don't want file dropping
-pasteArea.addEventListener('dragover', (e) => {
-  e.preventDefault();
-});
-
-pasteArea.addEventListener('drop', (e) => {
-  e.preventDefault();
-  // No drag/drop functionality - users should copy from Outlook
 });
 
 // Button handlers
 document.getElementById('cleanBtn').addEventListener('click', () => {
+  syncPlainTextFromEditor();
   const input = inputTextarea.value || '';
   const output = cleanEmailTrail(input);
   const outputTextarea = document.getElementById('output');
@@ -492,6 +683,7 @@ document.getElementById('cleanBtn').addEventListener('click', () => {
 });
 
 document.getElementById('clearBtn').addEventListener('click', () => {
+  editorEl.innerHTML = '';
   inputTextarea.value = '';
   document.getElementById('output').value = '';
   document.getElementById('copyOptions').style.display = 'none';
