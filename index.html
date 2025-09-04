@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Email Trail Cleaner (No CSS)</title>
+</head>
+<body>
+  <h2>Email Trail Cleaner</h2>
+  <p>Paste the raw email trail below and click <strong>Clean</strong>.</p>
+
+  <textarea id="input" rows="18" cols="100" placeholder="Paste email trail here..."></textarea>
+  <br><br>
+  <button id="cleanBtn">Clean</button>
+  <button id="copyBtn">Copy Output</button>
+  <button id="downloadBtn">Download .txt</button>
+  <br><br>
+  <label for="output"><strong>Output:</strong></label><br>
+  <textarea id="output" rows="18" cols="100" readonly></textarea>
+
+<script>
+/* ---------- helpers ---------- */
+function normalizeSpaces(s) {
+  return s.replace(/\r\n/g, '\n')
+          .replace(/[ \t]+/g, ' ')
+          .replace(/\s+\n/g, '\n')
+          .replace(/\n{3,}/g, '\n\n');
+}
+function normalizeForCompare(s) {
+  return s.toLowerCase().replace(/\s+/g, ' ').replace(/[^\p{L}\p{N}@\- ]+/gu, '').trim();
+}
+function emailToDisplayName(email) {
+  const left = (email || '').split('@')[0];
+  const parts = left.split(/[._\-]+/).filter(Boolean);
+  if (!parts.length) return left;
+  return parts.map(p => p.length === 1 ? p.toUpperCase() : p[0].toUpperCase()+p.slice(1).toLowerCase()).join(' ');
+}
+function cleanAngleBracketsNames(text) {
+  // "Name <email>" -> "Name"
+  return text.replace(/([^<\n>]+)<[^>\n]+>/g, (_, p1) => p1.trim());
+}
+function convertBareEmailsToNames(val) {
+  return val.replace(/\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/g, (m) => emailToDisplayName(m));
+}
+function splitHeaderBody(text) {
+  const lines = text.split('\n');
+  let end = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (/^\s*(From|Sent|To|Cc|Subject):/i.test(l)) {
+      end = i; // keep advancing while headers continue
+      continue;
+    }
+    // first non-header line; include a trailing blank if present
+    if (end >= 0) {
+      if (!l.trim()) end = i; // include one blank line
+      break;
+    } else {
+      break;
+    }
+  }
+  if (end < 0) return { header: '', body: text };
+  return {
+    header: lines.slice(0, end + 1).join('\n').trim(),
+    body: lines.slice(end + 1).join('\n')
+  };
+}
+function breakRunOnSentences(s) {
+  return s.split('\n').map(line => {
+    const t = line.trim();
+    if (t.length > 140 && /[.!?].+[.!?]/.test(t)) {
+      return t.replace(/([.!?])\s+(?=[A-Z@])/g, '$1\n');
+    }
+    return line;
+  }).join('\n');
+}
+function dedupeLinesKeepLast(body) {
+  const lines = body.split('\n');
+  const seen = new Set();
+  const kept = [];
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const L = lines[i];
+    const t = L.trim();
+    if (!t) { kept.push(L); continue; }
+    const norm = normalizeForCompare(t);
+    if (!norm) continue;
+    if (!seen.has(norm)) {
+      seen.add(norm);
+      kept.push(L);
+    }
+  }
+  kept.reverse();
+  return kept.join('\n').replace(/\n{3,}/g, '\n\n');
+}
+function formatNumericList(body) {
+  // "1    Confirm..." -> "1. Confirm..."
+  return body.replace(/^\s*(\d+)[\t ]+([^\n]+)$/gm, (m, n, rest) => `${n}. ${rest.trim()}`);
+}
+function cleanSignOff(body) {
+  // Keep sign-off line, then keep only the next non-empty line (name), drop title/department lines
+  const lines = body.split('\n');
+  const out = [];
+  const signRx = /^(Kind regards|Best regards|Regards|Thanks|Thank you)\s*,?\s*$/i;
+  let keepNextName = false;
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i];
+    if (keepNextName) {
+      const t = L.trim();
+      if (t) {
+        out.push(t); // likely name
+        // skip up to 3 lines if they look like titles/departments
+        let j = i + 1, dropped = 0;
+        while (j < lines.length && dropped < 3) {
+          const t2 = (lines[j] || '').trim();
+          if (!t2) { j++; dropped++; continue; }
+          if (/\b(Engineer|Manager|Director|Lead|Officer|Coordinator|Specialist|Department|Division|Solutions|Technology|Information|Corporate|ICT|IT|Consultant|Analyst|Support|Team)\b/i.test(t2)) {
+            j++; dropped++; continue;
+          }
+          break;
+        }
+        i = j - 1;
+      }
+      keepNextName = false;
+      continue;
+    }
+    if (signRx.test(L.trim())) {
+      if (out.length && out[out.length - 1].trim() !== '') out.push('');
+      out.push(L.trim().replace(/,?$/, ',')); // ensure a single comma
+      keepNextName = true;
+      continue;
+    }
+    out.push(L);
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n');
+}
+
+/* ---------- main cleaner ---------- */
+function cleanEmailTrail(raw) {
+  if (!raw) return '';
+  let text = normalizeSpaces(raw);
+
+  // A) Remove classification markers and banners GLOBALLY (safe)
+  // - remove lines like "C1 Controlled"
+  text = text.replace(/^\s*C\d+\s*Controlled.*\n?/gmi, '');
+  // - lines starting with "CLASSIFICATION: ..."
+  text = text.replace(/^\s*CLASSIFICATION\s*:\s*.*$/gmi, '');
+  // - inline line-start classification prefix (strip just the prefix)
+  text = text.replace(/^\s*CLASSIFICATION\s*:\s*C?\d+\s*[-–—]?\s*CONTROLLED\s*/gmi, '');
+
+  // Remove EXTERNAL banner blocks and warnings
+  text = text.replace(/^[A-Za-z0-9+/=]{8,}.*BannerStart[\s\S]*?BannerEnd.*\n?/gmi, '');
+  text = text
+    .replace(/^\s*\[EXTERNAL\][^\n]*\n?/gmi, '')
+    .replace(/^\s*EXTERNAL:\s.*\n?/gmi, '')
+    .replace(/^\s*This message originated.*\n?/gmi, '');
+
+  // Remove Subject lines (header element)
+  text = text.replace(/^\s*Subject:.*\n?/gmi, '');
+
+  // Convert "Name <email>" to "Name" everywhere (harmless for body too)
+  text = cleanAngleBracketsNames(text);
+
+  // B) Split header/body NOW, so later removals don't affect headers
+  const split = splitHeaderBody(text);
+  let header = split.header || '';
+  let body = split.body || '';
+
+  // C) Clean HEADER ONLY (keep From/Sent/To, drop Cc)
+  header = header
+    .replace(/^(From|Sent|To|Cc):\s*(.*)$/gmi, (m, label, val) => {
+      // convert bare emails to display names within header
+      val = convertBareEmailsToNames(val);
+      // tidy semicolons and spaces
+      val = val.replace(/\s*;\s*/g, '; ').replace(/\s{2,}/g, ' ').trim();
+      return `${label}: ${val}`;
+    })
+    .replace(/^\s*Cc:.*\n?/gmi, '') // drop Cc completely
+    .trim();
+
+  // D) Clean BODY ONLY (disclaimers, signatures, run-ons, lists, etc.)
+
+  // Trim any remaining "CLASSIFICATION:" lines in body
+  body = body.replace(/^\s*CLASSIFICATION\s*:\s*.*$/gmi, '');
+
+  // Normalize bullets and separators
+  body = body.replace(/^\s*[-–—]\s*/gm, '- ')
+             .replace(/^\s*_{5,}.*\n?/gm, '')
+             .replace(/^\s*-{5,}.*\n?/gm, '');
+
+  // Remove notification/marketing footers
+  const footerLineRx = [
+    /you.?re receiving emails?/i,
+    /you are receiving this email/i,
+    /to (?:change|update|manage|turn off).*email/i,
+    /\bunsubscribe\b/i,
+    /\bmanage (?:your )?(?:preferences|subscriptions)\b/i,
+    /\bemail preferences\b/i,
+    /\bprivacy policy\b/i,
+    /\bterms of service\b/i,
+    /\bview in (?:your )?browser\b/i
+  ];
+  footerLineRx.forEach(rx => {
+    body = body.replace(new RegExp(`^.*${rx.source}.*$`, 'gmi'), '');
+  });
+
+  // Remove confidentiality/legal disclaimers (line-by-line and as a block)
+  const disclaimerLineRx = [
+    /^This e-?mail and any attachments are confidential/i,
+    /^This email and any attachments are confidential/i,
+    /^The information (?:in|contained in) this e-?mail is confidential/i,
+    /confidential.*legally privileged/i,
+    /^If you are not the addressee/i,
+    /^If you are not the intended recipient/i,
+    /you may not copy, forward, disclose/i,
+    /delete the original and any printout/i,
+    /any disclosure, copying, distribution/i,
+    /no (?:liability|responsibility) whatsoever/i,
+    /whilst all reasonable steps are taken/i,
+    /virus.*(computer|software)/i
+  ];
+  disclaimerLineRx.forEach(rx => {
+    body = body.replace(new RegExp(rx.source, 'gmi'), (m) => ''); // remove matching piece
+  });
+  // Clean now-empty disclaimer lines
+  body = body.replace(/^\s*($)/gmi, '');
+
+  // Remove disclaimer blocks starting with common openers until blank line or EOF
+  body = body.replace(
+    /^\s*(This e-?mail.*confidential[\s\S]*?)(?=\n\s*\n|$)/gmi, ''
+  ).replace(
+    /^\s*(The information.*confidential[\s\S]*?)(?=\n\s*\n|$)/gmi, ''
+  );
+
+  // Signature/contact lines in BODY (do NOT apply to header)
+  const signatureRx = new RegExp([
+    // labels
+    /^(?:tel(?:ephone)?|phone|fax|office|mobile|direct|switchboard|website|web|site|email)\s*:.*$/i.source,
+    // single-letter phone/email prefixes with or without dot
+    /^(?:p|m|t|f|e|w)\.?\s*[\+:0-9].*$/i.source,
+    // phone-number-like lines
+    /^[\s\+()0-9-]{8,}$/i.source,
+    // links
+    /^.*\b(?:https?:\/\/|www\.)\S*$/i.source,
+    // bare domain e.g., qatarenergy.qa
+    /^\s*[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:\/\S*)?\s*$/i.source,
+    // standalone emails
+    /^\s*[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\s*$/i.source
+  ].join('|'), 'gmi');
+  body = body.replace(signatureRx, '');
+
+  // Remove table header like "ID    Request    Subsidiary Response"
+  body = body.replace(/^\s*ID\s+Request\s+.*Subsidiary.*$/gmi, '');
+
+  // Tidy commas (no "Thank you, for" style injection)
+  body = body.replace(/\s+,/g, ',');
+
+  // Reflow long run-ons
+  body = breakRunOnSentences(body);
+
+  // Format numeric list
+  body = formatNumericList(body);
+
+  // De-duplicate lines keeping last occurrence
+  body = dedupeLinesKeepLast(body);
+
+  // Greeting separation
+  body = body.replace(/\b(Hi|Hello|Dear)\s+([^\n,]+),?/i, (m, g1, g2) => `${g1} ${g2},\n\n`);
+
+  // Clean sign-off (keep only name after sign-off)
+  body = cleanSignOff(body);
+
+  // Final tidy
+  body = normalizeSpaces(body).trim();
+
+  // Join
+  const out = [header, body].filter(Boolean).join('\n\n').trim();
+  return out;
+}
+
+/* ---------- UI ---------- */
+document.getElementById('cleanBtn').addEventListener('click', () => {
+  const input = document.getElementById('input').value || '';
+  const output = cleanEmailTrail(input);
+  document.getElementById('output').value = output;
+});
+document.getElementById('copyBtn').addEventListener('click', async () => {
+  const out = document.getElementById('output').value || '';
+  try {
+    await navigator.clipboard.writeText(out);
+    alert('Clean text copied to clipboard.');
+  } catch {
+    alert('Could not copy automatically. Please select and copy manually.');
+  }
+});
+document.getElementById('downloadBtn').addEventListener('click', () => {
+  const out = document.getElementById('output').value || '';
+  const blob = new Blob([out], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'cleaned-email.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+</script>
+</body>
