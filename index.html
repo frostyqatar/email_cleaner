@@ -2,20 +2,135 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Email Trail Cleaner (No CSS)</title>
+  <title>Email Trail Cleaner with OCR</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      background: #f5f5f5;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    .input-section {
+      margin-bottom: 20px;
+    }
+    .paste-area {
+      border: 2px dashed #ccc;
+      padding: 20px;
+      text-align: center;
+      margin-bottom: 10px;
+      border-radius: 4px;
+      background: #fafafa;
+    }
+    .paste-area.dragover {
+      border-color: #007cba;
+      background: #e3f2fd;
+    }
+    textarea {
+      width: 100%;
+      box-sizing: border-box;
+      font-family: monospace;
+      font-size: 12px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      padding: 8px;
+    }
+    .button-group {
+      margin: 10px 0;
+    }
+    button {
+      padding: 8px 16px;
+      margin-right: 10px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .btn-primary {
+      background: #007cba;
+      color: white;
+    }
+    .btn-secondary {
+      background: #6c757d;
+      color: white;
+    }
+    .btn-success {
+      background: #28a745;
+      color: white;
+    }
+    .copy-options {
+      display: none;
+      margin-top: 10px;
+    }
+    .copy-chunk-btn {
+      background: #17a2b8;
+      color: white;
+      margin: 2px;
+      font-size: 12px;
+      padding: 6px 12px;
+    }
+    .ocr-status {
+      margin: 10px 0;
+      padding: 8px;
+      border-radius: 4px;
+      display: none;
+    }
+    .ocr-processing {
+      background: #fff3cd;
+      color: #856404;
+    }
+    .ocr-success {
+      background: #d4edda;
+      color: #155724;
+    }
+    .ocr-error {
+      background: #f8d7da;
+      color: #721c24;
+    }
+  </style>
 </head>
 <body>
-  <h2>Email Trail Cleaner</h2>
-  <p>Paste the raw email trail below and click <strong>Clean</strong>.</p>
+  <div class="container">
+    <h2>Email Trail Cleaner with OCR</h2>
+    
+    <div class="input-section">
+      <div class="paste-area" id="pasteArea">
+        <p><strong>Drop images here or paste email content with Ctrl+V</strong></p>
+        <p>Supports: Images (PNG, JPG, GIF, WebP) for OCR extraction</p>
+      </div>
+      <div class="ocr-status" id="ocrStatus"></div>
+      <textarea id="input" rows="18" placeholder="Email content will appear here after pasting or OCR..."></textarea>
+    </div>
 
-  <textarea id="input" rows="18" cols="100" placeholder="Paste email trail here..."></textarea>
-  <br><br>
-  <button id="cleanBtn">Clean</button>
-  <button id="copyBtn">Copy Output</button>
-  <button id="downloadBtn">Download .txt</button>
-  <br><br>
-  <label for="output"><strong>Output:</strong></label><br>
-  <textarea id="output" rows="18" cols="100" readonly></textarea>
+    <div class="button-group">
+      <button class="btn-primary" id="cleanBtn">Clean Email</button>
+      <button class="btn-secondary" id="clearBtn">Clear</button>
+    </div>
+
+    <div class="button-group">
+      <button class="btn-success" id="copyBtn">Copy Output</button>
+      <button class="btn-secondary" id="showChunksBtn">Show Copy Chunks</button>
+      <button class="btn-secondary" id="downloadBtn">Download .txt</button>
+    </div>
+
+    <div class="copy-options" id="copyOptions">
+      <div id="chunkButtons"></div>
+    </div>
+
+    <div>
+      <label for="output"><strong>Cleaned Output:</strong></label>
+      <textarea id="output" rows="18" readonly></textarea>
+    </div>
+  </div>
+
+  <!-- Include Tesseract.js from CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/4.1.1/tesseract.min.js"></script>
 
 <script>
 /* ---------- helpers ---------- */
@@ -35,7 +150,6 @@ function emailToDisplayName(email) {
   return parts.map(p => p.length === 1 ? p.toUpperCase() : p[0].toUpperCase()+p.slice(1).toLowerCase()).join(' ');
 }
 function cleanAngleBracketsNames(text) {
-  // "Name <email>" -> "Name"
   return text.replace(/([^<\n>]+)<[^>\n]+>/g, (_, p1) => p1.trim());
 }
 function convertBareEmailsToNames(val) {
@@ -47,12 +161,11 @@ function splitHeaderBody(text) {
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     if (/^\s*(From|Sent|To|Cc|Subject):/i.test(l)) {
-      end = i; // keep advancing while headers continue
+      end = i;
       continue;
     }
-    // first non-header line; include a trailing blank if present
     if (end >= 0) {
-      if (!l.trim()) end = i; // include one blank line
+      if (!l.trim()) end = i;
       break;
     } else {
       break;
@@ -92,11 +205,9 @@ function dedupeLinesKeepLast(body) {
   return kept.join('\n').replace(/\n{3,}/g, '\n\n');
 }
 function formatNumericList(body) {
-  // "1    Confirm..." -> "1. Confirm..."
   return body.replace(/^\s*(\d+)[\t ]+([^\n]+)$/gm, (m, n, rest) => `${n}. ${rest.trim()}`);
 }
 function cleanSignOff(body) {
-  // Keep sign-off line, then keep only the next non-empty line (name), drop title/department lines
   const lines = body.split('\n');
   const out = [];
   const signRx = /^(Kind regards|Best regards|Regards|Thanks|Thank you)\s*,?\s*$/i;
@@ -106,8 +217,7 @@ function cleanSignOff(body) {
     if (keepNextName) {
       const t = L.trim();
       if (t) {
-        out.push(t); // likely name
-        // skip up to 3 lines if they look like titles/departments
+        out.push(t);
         let j = i + 1, dropped = 0;
         while (j < lines.length && dropped < 3) {
           const t2 = (lines[j] || '').trim();
@@ -124,7 +234,7 @@ function cleanSignOff(body) {
     }
     if (signRx.test(L.trim())) {
       if (out.length && out[out.length - 1].trim() !== '') out.push('');
-      out.push(L.trim().replace(/,?$/, ',')); // ensure a single comma
+      out.push(L.trim().replace(/,?$/, ','));
       keepNextName = true;
       continue;
     }
@@ -138,55 +248,35 @@ function cleanEmailTrail(raw) {
   if (!raw) return '';
   let text = normalizeSpaces(raw);
 
-  // A) Remove classification markers and banners GLOBALLY (safe)
-  // - remove lines like "C1 Controlled"
   text = text.replace(/^\s*C\d+\s*Controlled.*\n?/gmi, '');
-  // - lines starting with "CLASSIFICATION: ..."
   text = text.replace(/^\s*CLASSIFICATION\s*:\s*.*$/gmi, '');
-  // - inline line-start classification prefix (strip just the prefix)
   text = text.replace(/^\s*CLASSIFICATION\s*:\s*C?\d+\s*[-–—]?\s*CONTROLLED\s*/gmi, '');
-
-  // Remove EXTERNAL banner blocks and warnings
   text = text.replace(/^[A-Za-z0-9+/=]{8,}.*BannerStart[\s\S]*?BannerEnd.*\n?/gmi, '');
   text = text
     .replace(/^\s*\[EXTERNAL\][^\n]*\n?/gmi, '')
     .replace(/^\s*EXTERNAL:\s.*\n?/gmi, '')
     .replace(/^\s*This message originated.*\n?/gmi, '');
-
-  // Remove Subject lines (header element)
   text = text.replace(/^\s*Subject:.*\n?/gmi, '');
-
-  // Convert "Name <email>" to "Name" everywhere (harmless for body too)
   text = cleanAngleBracketsNames(text);
 
-  // B) Split header/body NOW, so later removals don't affect headers
   const split = splitHeaderBody(text);
   let header = split.header || '';
   let body = split.body || '';
 
-  // C) Clean HEADER ONLY (keep From/Sent/To, drop Cc)
   header = header
     .replace(/^(From|Sent|To|Cc):\s*(.*)$/gmi, (m, label, val) => {
-      // convert bare emails to display names within header
       val = convertBareEmailsToNames(val);
-      // tidy semicolons and spaces
       val = val.replace(/\s*;\s*/g, '; ').replace(/\s{2,}/g, ' ').trim();
       return `${label}: ${val}`;
     })
-    .replace(/^\s*Cc:.*\n?/gmi, '') // drop Cc completely
+    .replace(/^\s*Cc:.*\n?/gmi, '')
     .trim();
 
-  // D) Clean BODY ONLY (disclaimers, signatures, run-ons, lists, etc.)
-
-  // Trim any remaining "CLASSIFICATION:" lines in body
   body = body.replace(/^\s*CLASSIFICATION\s*:\s*.*$/gmi, '');
-
-  // Normalize bullets and separators
   body = body.replace(/^\s*[-–—]\s*/gm, '- ')
              .replace(/^\s*_{5,}.*\n?/gm, '')
              .replace(/^\s*-{5,}.*\n?/gm, '');
 
-  // Remove notification/marketing footers
   const footerLineRx = [
     /you.?re receiving emails?/i,
     /you are receiving this email/i,
@@ -202,7 +292,6 @@ function cleanEmailTrail(raw) {
     body = body.replace(new RegExp(`^.*${rx.source}.*$`, 'gmi'), '');
   });
 
-  // Remove confidentiality/legal disclaimers (line-by-line and as a block)
   const disclaimerLineRx = [
     /^This e-?mail and any attachments are confidential/i,
     /^This email and any attachments are confidential/i,
@@ -218,70 +307,197 @@ function cleanEmailTrail(raw) {
     /virus.*(computer|software)/i
   ];
   disclaimerLineRx.forEach(rx => {
-    body = body.replace(new RegExp(rx.source, 'gmi'), (m) => ''); // remove matching piece
+    body = body.replace(new RegExp(rx.source, 'gmi'), (m) => '');
   });
-  // Clean now-empty disclaimer lines
   body = body.replace(/^\s*($)/gmi, '');
 
-  // Remove disclaimer blocks starting with common openers until blank line or EOF
   body = body.replace(
     /^\s*(This e-?mail.*confidential[\s\S]*?)(?=\n\s*\n|$)/gmi, ''
   ).replace(
     /^\s*(The information.*confidential[\s\S]*?)(?=\n\s*\n|$)/gmi, ''
   );
 
-  // Signature/contact lines in BODY (do NOT apply to header)
   const signatureRx = new RegExp([
-    // labels
     /^(?:tel(?:ephone)?|phone|fax|office|mobile|direct|switchboard|website|web|site|email)\s*:.*$/i.source,
-    // single-letter phone/email prefixes with or without dot
     /^(?:p|m|t|f|e|w)\.?\s*[\+:0-9].*$/i.source,
-    // phone-number-like lines
     /^[\s\+()0-9-]{8,}$/i.source,
-    // links
     /^.*\b(?:https?:\/\/|www\.)\S*$/i.source,
-    // bare domain e.g., qatarenergy.qa
     /^\s*[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:\/\S*)?\s*$/i.source,
-    // standalone emails
     /^\s*[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\s*$/i.source
   ].join('|'), 'gmi');
   body = body.replace(signatureRx, '');
 
-  // Remove table header like "ID    Request    Subsidiary Response"
   body = body.replace(/^\s*ID\s+Request\s+.*Subsidiary.*$/gmi, '');
-
-  // Tidy commas (no "Thank you, for" style injection)
   body = body.replace(/\s+,/g, ',');
-
-  // Reflow long run-ons
   body = breakRunOnSentences(body);
-
-  // Format numeric list
   body = formatNumericList(body);
-
-  // De-duplicate lines keeping last occurrence
   body = dedupeLinesKeepLast(body);
-
-  // Greeting separation
   body = body.replace(/\b(Hi|Hello|Dear)\s+([^\n,]+),?/i, (m, g1, g2) => `${g1} ${g2},\n\n`);
-
-  // Clean sign-off (keep only name after sign-off)
   body = cleanSignOff(body);
-
-  // Final tidy
   body = normalizeSpaces(body).trim();
 
-  // Join
   const out = [header, body].filter(Boolean).join('\n\n').trim();
   return out;
 }
 
-/* ---------- UI ---------- */
-document.getElementById('cleanBtn').addEventListener('click', () => {
-  const input = document.getElementById('input').value || '';
-  const output = cleanEmailTrail(input);
-  document.getElementById('output').value = output;
+/* ---------- OCR functions ---------- */
+function showOcrStatus(message, type) {
+  const statusEl = document.getElementById('ocrStatus');
+  statusEl.textContent = message;
+  statusEl.className = `ocr-status ocr-${type}`;
+  statusEl.style.display = 'block';
+}
+
+function hideOcrStatus() {
+  document.getElementById('ocrStatus').style.display = 'none';
+}
+
+async function processImageWithOCR(file) {
+  showOcrStatus('Processing image with OCR...', 'processing');
+  
+  try {
+    const { data: { text } } = await Tesseract.recognize(file, 'eng', {
+      logger: m => {
+        if (m.status === 'recognizing text') {
+          showOcrStatus(`OCR Progress: ${Math.round(m.progress * 100)}%`, 'processing');
+        }
+      }
+    });
+    
+    if (text.trim()) {
+      showOcrStatus('OCR completed successfully!', 'success');
+      setTimeout(hideOcrStatus, 3000);
+      return text;
+    } else {
+      showOcrStatus('No text found in image', 'error');
+      setTimeout(hideOcrStatus, 3000);
+      return '';
+    }
+  } catch (error) {
+    showOcrStatus('OCR failed: ' + error.message, 'error');
+    setTimeout(hideOcrStatus, 5000);
+    return '';
+  }
+}
+
+function isImageFile(file) {
+  return file && file.type && file.type.startsWith('image/');
+}
+
+/* ---------- Copy chunks ---------- */
+function createChunkButtons(text) {
+  const chunkSize = 8000;
+  const chunks = [];
+  for (let i = 0; i < text.length; i += chunkSize) {
+    chunks.push(text.substring(i, i + chunkSize));
+  }
+  
+  const container = document.getElementById('chunkButtons');
+  container.innerHTML = '';
+  
+  if (chunks.length <= 1) {
+    container.innerHTML = '<p>Text is small enough for single copy</p>';
+    return;
+  }
+  
+  chunks.forEach((chunk, index) => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-chunk-btn';
+    btn.textContent = `Copy chunk ${index + 1} (${chunk.length} chars)`;
+    btn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(chunk);
+        btn.textContent = `✓ Copied chunk ${index + 1}`;
+        setTimeout(() => {
+          btn.textContent = `Copy chunk ${index + 1} (${chunk.length} chars)`;
+        }, 2000);
+      } catch {
+        alert('Could not copy automatically. Please select and copy manually.');
+      }
+    };
+    container.appendChild(btn);
+  });
+}
+
+/* ---------- Event Handlers ---------- */
+const pasteArea = document.getElementById('pasteArea');
+const inputTextarea = document.getElementById('input');
+
+// Paste handling
+pasteArea.addEventListener('paste', async (e) => {
+  e.preventDefault();
+  const items = Array.from(e.clipboardData.items);
+  
+  for (const item of items) {
+    if (item.kind === 'file' && isImageFile(item.getAsFile())) {
+      const file = item.getAsFile();
+      const ocrText = await processImageWithOCR(file);
+      if (ocrText) {
+        inputTextarea.value = (inputTextarea.value + '\n' + ocrText).trim();
+      }
+      return;
+    }
+  }
+  
+  // Handle text paste
+  const text = e.clipboardData.getData('text/plain');
+  if (text) {
+    inputTextarea.value = text;
+  }
 });
+
+// Global paste handling
+document.addEventListener('paste', async (e) => {
+  if (e.target === inputTextarea) return; // Let textarea handle its own paste
+  
+  e.preventDefault();
+  const items = Array.from(e.clipboardData.items);
+  
+  for (const item of items) {
+    if (item.kind === 'file' && isImageFile(item.getAsFile())) {
+      const file = item.getAsFile();
+      const ocrText = await processImageWithOCR(file);
+      if (ocrText) {
+        inputTextarea.value = (inputTextarea.value + '\n' + ocrText).trim();
+      }
+      return;
+    }
+  }
+  
+  const text = e.clipboardData.getData('text/plain');
+  if (text) {
+    inputTextarea.value = text;
+  }
+});
+
+// Drag and drop - removed since we don't want file dropping
+pasteArea.addEventListener('dragover', (e) => {
+  e.preventDefault();
+});
+
+pasteArea.addEventListener('drop', (e) => {
+  e.preventDefault();
+  // No drag/drop functionality - users should copy from Outlook
+});
+
+// Button handlers
+document.getElementById('cleanBtn').addEventListener('click', () => {
+  const input = inputTextarea.value || '';
+  const output = cleanEmailTrail(input);
+  const outputTextarea = document.getElementById('output');
+  outputTextarea.value = output;
+  
+  // Update chunk buttons
+  createChunkButtons(output);
+});
+
+document.getElementById('clearBtn').addEventListener('click', () => {
+  inputTextarea.value = '';
+  document.getElementById('output').value = '';
+  document.getElementById('copyOptions').style.display = 'none';
+  hideOcrStatus();
+});
+
 document.getElementById('copyBtn').addEventListener('click', async () => {
   const out = document.getElementById('output').value || '';
   try {
@@ -291,6 +507,21 @@ document.getElementById('copyBtn').addEventListener('click', async () => {
     alert('Could not copy automatically. Please select and copy manually.');
   }
 });
+
+document.getElementById('showChunksBtn').addEventListener('click', () => {
+  const output = document.getElementById('output').value || '';
+  const copyOptions = document.getElementById('copyOptions');
+  
+  if (copyOptions.style.display === 'none' || !copyOptions.style.display) {
+    createChunkButtons(output);
+    copyOptions.style.display = 'block';
+    document.getElementById('showChunksBtn').textContent = 'Hide Copy Chunks';
+  } else {
+    copyOptions.style.display = 'none';
+    document.getElementById('showChunksBtn').textContent = 'Show Copy Chunks';
+  }
+});
+
 document.getElementById('downloadBtn').addEventListener('click', () => {
   const out = document.getElementById('output').value || '';
   const blob = new Blob([out], { type: 'text/plain' });
@@ -302,3 +533,4 @@ document.getElementById('downloadBtn').addEventListener('click', () => {
 });
 </script>
 </body>
+</html>
